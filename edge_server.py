@@ -28,6 +28,9 @@ import time
 import uuid
 from typing import Dict, Any, List
 import tempfile
+import aiohttp
+import signal
+import sys
 
 # Configure logging
 logging.basicConfig(
@@ -397,16 +400,18 @@ class TerminalManager:
 class EdgeServer:
     """Main edge server class"""
 
-    def __init__(self, device_id: str, host: str = '0.0.0.0', port: int = 8080):
+    def __init__(self, device_id: str, host: str = '0.0.0.0', port: int = 8080, api_url: str = 'http://172.30.30.233:3001'):
         self.device_id = device_id
         self.host = host
         self.port = port
+        self.api_url = api_url
         self.clients: Dict[str, websockets.WebSocketServerProtocol] = {}
         self.system_monitor = SystemMonitor()
         self.file_manager = FileManager()
         self.terminal_manager = TerminalManager()
         self.stats_interval = 10  # seconds
         self.running = False
+        self.api_connected = False
 
     async def register_client(self, websocket, path):
         """Register a new client connection"""
@@ -574,21 +579,80 @@ class EdgeServer:
                 logger.error(f"Error broadcasting stats: {str(e)}")
                 await asyncio.sleep(self.stats_interval)
 
+    async def register_with_api(self):
+        """Register this edge server with the management API"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Update device API status
+                async with session.patch(
+                    f"{self.api_url}/api/devices/api-status/{self.device_id}",
+                    json={"api_status": "connected", "server_info": {
+                        "host": self.host, "port": self.port}}
+                ) as response:
+                    if response.status == 200:
+                        self.api_connected = True
+                        logger.info(
+                            f"✅ Successfully registered with management API")
+                        return True
+                    else:
+                        logger.error(
+                            f"❌ Failed to register with API: {response.status}")
+                        return False
+        except Exception as error:
+            logger.error(f"❌ API registration failed: {error}")
+            return False
+
+    async def send_heartbeat(self):
+        """Send periodic heartbeat to management API"""
+        while self.running and self.api_connected:
+            try:
+                stats = {
+                    'cpu_usage': self.system_monitor.get_cpu_usage(),
+                    'ram_usage': self.system_monitor.get_memory_usage(),
+                    'temperature': self.system_monitor.get_temperature(),
+                    'timestamp': datetime.now().isoformat()
+                }
+
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"{self.api_url}/api/devices/heartbeat/{self.device_id}",
+                        json=stats
+                    ) as response:
+                        if response.status != 200:
+                            logger.warning(
+                                f"⚠️ Heartbeat failed: {response.status}")
+
+            except Exception as error:
+                logger.error(f"💔 Heartbeat error: {error}")
+
+            await asyncio.sleep(30)  # Send heartbeat every 30 seconds
+
     async def start_server(self):
         """Start the WebSocket server"""
         self.running = True
-        logger.info(f"Starting Edge Server for device: {self.device_id}")
+        logger.info(f"🚀 Starting Edge Server for device: {self.device_id}")
         logger.info(
-            f"WebSocket server starting on ws://{self.host}:{self.port}")
+            f"📡 WebSocket server starting on ws://{self.host}:{self.port}")
+
+        # Register with management API
+        logger.info(
+            f"🔗 Attempting to register with management API: {self.api_url}")
+        await self.register_with_api()
 
         # Start stats broadcaster
         asyncio.create_task(self.stats_broadcaster())
+
+        # Start heartbeat if API connected
+        if self.api_connected:
+            asyncio.create_task(self.send_heartbeat())
 
         # Start WebSocket server
         async with websockets.serve(self.register_client, self.host, self.port):
             logger.info(
                 f"✅ Edge Server running on ws://{self.host}:{self.port}")
-            logger.info(f"Device ID: {self.device_id}")
+            logger.info(f"🔑 Device ID: {self.device_id}")
+            logger.info(
+                f"🌐 API Status: {'Connected' if self.api_connected else 'Disconnected'}")
             logger.info("Press Ctrl+C to stop the server")
 
             try:
@@ -606,7 +670,9 @@ def main():
     parser.add_argument('--port', type=int, default=8080,
                         help='Port to bind to')
     parser.add_argument('--device-id', required=True,
-                        help='Unique device identifier')
+                        help='Unique device identifier (provided by management system)')
+    parser.add_argument('--api-url', default='http://172.30.30.233:3001',
+                        help='Management API URL (default: http://172.30.30.233:3001)')
     parser.add_argument('--stats-interval', type=int,
                         default=10, help='Stats broadcast interval in seconds')
     parser.add_argument('--log-level', default='INFO', help='Log level')
@@ -616,18 +682,24 @@ def main():
     # Configure logging level
     logging.getLogger().setLevel(getattr(logging, args.log_level.upper()))
 
+    logger.info("🔧 IoT Edge Server Configuration:")
+    logger.info(f"   Device ID: {args.device_id}")
+    logger.info(f"   Server: {args.host}:{args.port}")
+    logger.info(f"   API URL: {args.api_url}")
+
     # Create and start server
     server = EdgeServer(
         device_id=args.device_id,
         host=args.host,
-        port=args.port
+        port=args.port,
+        api_url=args.api_url
     )
     server.stats_interval = args.stats_interval
 
     try:
         asyncio.run(server.start_server())
     except KeyboardInterrupt:
-        logger.info("Server stopped by user")
+        logger.info("🛑 Server stopped by user")
     except Exception as e:
         logger.error(f"Server error: {str(e)}")
 
