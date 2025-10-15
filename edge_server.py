@@ -498,6 +498,7 @@ class HttpApiServer:
         self.app = web.Application()
 
         # CORS middleware
+        @web.middleware
         async def handle_cors(request, handler):
             response = await handler(request)
             response.headers['Access-Control-Allow-Origin'] = '*'
@@ -534,8 +535,15 @@ class HttpApiServer:
     async def list_files(self, request):
         """List directory contents"""
         try:
-            data = await request.json()
-            path = data.get('path', '/home')
+            # Handle both JSON body and query parameters
+            try:
+                data = await request.json()
+            except Exception:
+                # If JSON parsing fails, use query parameters or defaults
+                data = {}
+
+            # Try to get path from JSON body, query params, or use default
+            path = data.get('path') or request.query.get('path', '/home')
             logger.info(f"📁 Listing files for path: {path}")
             result = self.file_manager.list_directory(path)
             logger.info(
@@ -543,6 +551,8 @@ class HttpApiServer:
             return web.json_response(result)
         except Exception as e:
             logger.error(f"❌ Error listing files: {str(e)}")
+            import traceback
+            traceback.print_exc()  # Print full traceback for debugging
             return web.json_response({'success': False, 'error': str(e)}, status=500)
 
     async def read_file(self, request):
@@ -563,7 +573,11 @@ class HttpApiServer:
     async def write_file(self, request):
         """Write file contents"""
         try:
-            data = await request.json()
+            try:
+                data = await request.json()
+            except Exception:
+                return web.json_response({'success': False, 'error': 'Invalid JSON body'}, status=400)
+
             path = data.get('path')
             content = data.get('content', '')
 
@@ -578,7 +592,11 @@ class HttpApiServer:
     async def delete_file(self, request):
         """Delete file or directory"""
         try:
-            data = await request.json()
+            try:
+                data = await request.json()
+            except Exception:
+                return web.json_response({'success': False, 'error': 'Invalid JSON body'}, status=400)
+
             path = data.get('path')
 
             if not path:
@@ -603,8 +621,14 @@ class HttpApiServer:
     async def execute_command(self, request):
         """Execute shell command"""
         try:
-            data = await request.json()
-            command = data.get('cmd') or data.get('command')
+            # Handle both JSON body and query parameters
+            try:
+                data = await request.json()
+            except Exception:
+                data = {}
+
+            command = data.get('cmd') or data.get('command') or request.query.get(
+                'cmd') or request.query.get('command')
 
             if not command:
                 return web.json_response({'success': False, 'error': 'Missing command parameter'}, status=400)
