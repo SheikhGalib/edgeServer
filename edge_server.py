@@ -34,6 +34,8 @@ import sys
 from aiohttp import web, web_request
 import json
 from urllib.parse import parse_qs
+import pty
+import select
 
 # Configure logging
 logging.basicConfig(
@@ -375,13 +377,14 @@ class FileManager:
 
 
 class TerminalManager:
-    """Terminal session management"""
+    """Terminal session management with PTY support"""
 
     def __init__(self):
-        self.sessions: Dict[str, subprocess.Popen] = {}
+        # session_id -> (process, master_fd)
+        self.sessions: Dict[str, tuple] = {}
 
     def create_session(self, session_id: str = None) -> str:
-        """Create a new terminal session"""
+        """Create a new terminal session with PTY"""
         if not session_id:
             session_id = str(uuid.uuid4())
 
@@ -389,22 +392,37 @@ class TerminalManager:
         if session_id in self.sessions:
             self.close_session(session_id)
 
-        # Create new bash session
-        process = subprocess.Popen(
-            ['/bin/bash'],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            universal_newlines=True
-        )
+        try:
+            # Create PTY pair
+            master_fd, slave_fd = pty.openpty()
 
-        self.sessions[session_id] = process
-        logger.info(f"Created terminal session: {session_id}")
-        return session_id
+            # Create bash process with PTY
+            process = subprocess.Popen(
+                ['/bin/bash', '-i'],  # Interactive bash
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                close_fds=True,
+                preexec_fn=os.setsid  # Create new session
+            )
 
-    def execute_command(self, session_id: str, command: str) -> Dict[str, Any]:
+            # Close slave fd in parent process
+            os.close(slave_fd)
+
+            # Store session info
+            self.sessions[session_id] = (process, master_fd)
+            logger.info(f"Created PTY terminal session: {session_id}")
+
+            # Wait a bit for the shell to initialize
+            time.sleep(0.1)
+
+            return session_id
+
+        except Exception as e:
+            logger.error(f"Failed to create terminal session: {str(e)}")
+            raise
+
+    def execute_command(self, session_id: str, command: str, timeout: int = 5) -> Dict[str, Any]:
         """Execute command in terminal session"""
         try:
             if session_id not in self.sessions:
@@ -413,7 +431,7 @@ class TerminalManager:
                     'error': 'Terminal session not found'
                 }
 
-            process = self.sessions[session_id]
+            process, master_fd = self.sessions[session_id]
 
             # Check if process is still running
             if process.poll() is not None:
@@ -422,30 +440,63 @@ class TerminalManager:
                     'error': 'Terminal session has ended'
                 }
 
-            # Send command
-            process.stdin.write(f"{command}\n")
-            process.stdin.flush()
+            # Send command to PTY
+            try:
+                command_bytes = (command + '\n').encode('utf-8')
+                os.write(master_fd, command_bytes)
+            except Exception as e:
+                return {
+                    'success': False,
+                    'error': f'Failed to write command: {str(e)}'
+                }
 
-            # Read output (with timeout)
-            output_lines = []
-            start_time = time.time()
+            # Read output with timeout using select
+            output_parts = []
+            end_time = time.time() + timeout
 
-            while time.time() - start_time < 5:  # 5 second timeout
-                if process.stdout.readable():
+            while time.time() < end_time:
+                # Use select to check if data is available
+                rlist, _, _ = select.select([master_fd], [], [], 0.1)
+
+                if master_fd in rlist:
                     try:
-                        line = process.stdout.readline()
-                        if line:
-                            output_lines.append(line.rstrip())
+                        # Read available data
+                        data = os.read(master_fd, 4096).decode(
+                            'utf-8', errors='replace')
+                        if data:
+                            output_parts.append(data)
                         else:
                             break
-                    except Exception:
+                    except (OSError, UnicodeDecodeError) as e:
+                        logger.warning(f"Error reading from PTY: {str(e)}")
                         break
+                elif not rlist:
+                    # No data available, continue polling
+                    continue
                 else:
                     break
 
+            # Join all output parts
+            full_output = ''.join(output_parts)
+
+            # Clean up the output (remove command echo and prompts)
+            lines = full_output.split('\n')
+            cleaned_lines = []
+
+            for line in lines:
+                # Skip empty lines and command echoes
+                line = line.strip()
+                if line and not line.endswith('$') and line != command.strip():
+                    cleaned_lines.append(line)
+
+            cleaned_output = '\n'.join(
+                cleaned_lines) if cleaned_lines else full_output.strip()
+
             return {
                 'success': True,
-                'output': '\n'.join(output_lines),
+                'stdout': cleaned_output,
+                'stderr': '',  # PTY combines stdout and stderr
+                'exit_code': 0,  # PTY doesn't provide exit codes easily
                 'session_id': session_id
             }
 
@@ -461,14 +512,24 @@ class TerminalManager:
         """Close terminal session"""
         try:
             if session_id in self.sessions:
-                process = self.sessions[session_id]
-                process.terminate()
+                process, master_fd = self.sessions.pop(session_id)
+
+                # Close master fd
                 try:
-                    process.wait(timeout=5)
+                    os.close(master_fd)
+                except OSError:
+                    pass  # Already closed
+
+                # Terminate process
+                try:
+                    process.terminate()
+                    process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     process.kill()
+                    process.wait()
+                except ProcessLookupError:
+                    pass  # Process already dead
 
-                del self.sessions[session_id]
                 logger.info(f"Closed terminal session: {session_id}")
                 return True
             return False
@@ -491,6 +552,8 @@ class HttpApiServer:
         self.port = port
         self.file_manager = FileManager()
         self.system_monitor = SystemMonitor()
+        self.terminal_manager = TerminalManager()
+        self.default_session_id = "http_terminal_session"
         self.app = None
 
     def setup_routes(self):
@@ -619,7 +682,7 @@ class HttpApiServer:
             return web.json_response({'success': False, 'error': str(e)}, status=500)
 
     async def execute_command(self, request):
-        """Execute shell command"""
+        """Execute shell command using persistent terminal session"""
         try:
             # Handle both JSON body and query parameters
             try:
@@ -639,28 +702,36 @@ class HttpApiServer:
             if any(dangerous_cmd in command.lower() for dangerous_cmd in dangerous_commands):
                 return web.json_response({'success': False, 'error': 'Command not allowed'}, status=403)
 
-            try:
-                result = subprocess.run(
-                    command,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    cwd=os.path.expanduser('~')
-                )
+            # Ensure we have a terminal session
+            if self.default_session_id not in self.terminal_manager.sessions:
+                logger.info("Creating new terminal session for HTTP API")
+                self.terminal_manager.create_session(self.default_session_id)
 
+            # Execute command in persistent terminal session
+            logger.info(f"🖥️ Executing command: {command}")
+            result = self.terminal_manager.execute_command(
+                self.default_session_id, command, timeout=10)
+
+            if result['success']:
+                logger.info(f"✅ Command executed successfully")
                 return web.json_response({
                     'success': True,
-                    'stdout': result.stdout,
-                    'stderr': result.stderr,
-                    'exit_code': result.returncode
+                    'stdout': result.get('stdout', ''),
+                    'stderr': result.get('stderr', ''),
+                    'exit_code': result.get('exit_code', 0)
                 })
-            except subprocess.TimeoutExpired:
-                return web.json_response({'success': False, 'error': 'Command timeout (30s)'}, status=408)
-            except Exception as e:
-                return web.json_response({'success': False, 'error': str(e)}, status=500)
+            else:
+                logger.error(
+                    f"❌ Command failed: {result.get('error', 'Unknown error')}")
+                return web.json_response({
+                    'success': False,
+                    'error': result.get('error', 'Command execution failed')
+                }, status=500)
 
         except Exception as e:
+            logger.error(f"❌ Exception in execute_command: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return web.json_response({'success': False, 'error': str(e)}, status=500)
 
     async def get_system_stats(self, request):
@@ -685,6 +756,11 @@ class HttpApiServer:
         logger.info(
             f"🌐 HTTP API server started on http://{self.host}:{self.port}")
         return runner
+
+    def cleanup(self):
+        """Cleanup resources"""
+        logger.info("🧹 Cleaning up HTTP API server resources")
+        self.terminal_manager.close_all_sessions()
 
 
 class EdgeServer:
@@ -1025,6 +1101,7 @@ class EdgeServer:
                 logger.info("Shutting down server...")
                 self.running = False
                 self.terminal_manager.close_all_sessions()
+                self.http_server.cleanup()
 
 
 def main():
