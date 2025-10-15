@@ -692,11 +692,12 @@ class EdgeServer:
                 f"Error discovering Windows host: {e}, using default")
             return '172.30.16.1'
 
-    def __init__(self, device_id: str, host: str = '0.0.0.0', port: int = 8080, api_url: str = None, http_port: int = 8081):
+    def __init__(self, device_id: str, host: str = '0.0.0.0', port: int = 8080, api_url: str = None, http_port: int = 8081, public_http_url: str = None):
         self.device_id = device_id
         self.host = host
         self.port = port
         self.http_port = http_port
+        self.public_http_url = public_http_url  # Public ngrok URL for HTTP API
 
         # Auto-discover API URL if not provided
         if api_url is None:
@@ -884,16 +885,27 @@ class EdgeServer:
         """Register this edge server with the management API"""
         try:
             async with aiohttp.ClientSession() as session:
+                # Prepare server info
+                server_info = {
+                    "host": self.host,
+                    "port": self.port,
+                    "http_port": self.http_port,
+                    "public_http_url": self.public_http_url  # Include public HTTP URL
+                }
+
                 # Update device API status
                 async with session.patch(
                     f"{self.api_url}/api/devices/api-status/{self.device_id}",
-                    json={"api_status": "connected", "server_info": {
-                        "host": self.host, "port": self.port}}
+                    json={"api_status": "connected",
+                          "server_info": server_info}
                 ) as response:
                     if response.status == 200:
                         self.api_connected = True
                         logger.info(
                             f"✅ Successfully registered with management API")
+                        if self.public_http_url:
+                            logger.info(
+                                f"🌐 Public HTTP API URL: {self.public_http_url}")
                         return True
                     else:
                         logger.error(
@@ -1003,6 +1015,8 @@ def main():
                         help='Unique device identifier (provided by management system)')
     parser.add_argument('--api-url', default=None,
                         help='Management API URL (auto-discovers Windows host if not provided)')
+    parser.add_argument('--public-http-url', default=None,
+                        help='Public HTTP API URL (ngrok URL for accessing this device\'s HTTP API from internet)')
     parser.add_argument('--stats-interval', type=int,
                         default=10, help='Stats broadcast interval in seconds')
     parser.add_argument('--log-level', default='INFO', help='Log level')
@@ -1016,6 +1030,8 @@ def main():
     logger.info(f"   Device ID: {args.device_id}")
     logger.info(f"   WebSocket Server: {args.host}:{args.port}")
     logger.info(f"   HTTP API Server: {args.host}:{args.http_port}")
+    if args.public_http_url:
+        logger.info(f"   Public HTTP API URL: {args.public_http_url}")
 
     # Create server (will auto-discover API URL if not provided)
     server = EdgeServer(
@@ -1023,7 +1039,8 @@ def main():
         host=args.host,
         port=args.port,
         api_url=args.api_url,
-        http_port=args.http_port
+        http_port=args.http_port,
+        public_http_url=args.public_http_url
     )
 
     logger.info(f"   API URL: {server.api_url}")
