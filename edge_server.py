@@ -1031,12 +1031,24 @@ class EdgeServer:
                 # Get network information
                 network_info = self.system_monitor.get_network_info()
 
+                # Prepare server info
+                server_info = {
+                    'host': self.host,
+                    'port': self.port,
+                    'http_port': self.http_port
+                }
+
+                # Add public HTTP URL if available
+                if self.public_http_url:
+                    server_info['public_http_url'] = self.public_http_url
+
                 stats = {
                     'cpu_usage': self.system_monitor.get_cpu_usage(),
                     'ram_usage': ram_percentage,
                     'temperature': temperature,
                     'timestamp': datetime.now().isoformat(),
-                    'network_info': network_info
+                    'network_info': network_info,
+                    'server_info': server_info
                 }
 
                 logger.info(
