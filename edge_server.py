@@ -231,7 +231,15 @@ class FileManager:
 
     def __init__(self, base_path: str = "/home"):
         self.base_path = Path(base_path).resolve()
-        self.allowed_paths = [self.base_path, Path("/tmp"), Path("/var/log")]
+        self.allowed_paths = [
+            Path("/"),  # Allow root directory
+            Path("/home"),
+            Path("/tmp"),
+            Path("/var/log"),
+            Path("/opt"),
+            Path("/usr"),
+            Path("/etc")  # Common directories
+        ]
 
     def _is_safe_path(self, path: Path) -> bool:
         """Check if path is safe to access"""
@@ -528,9 +536,13 @@ class HttpApiServer:
         try:
             data = await request.json()
             path = data.get('path', '/home')
+            logger.info(f"📁 Listing files for path: {path}")
             result = self.file_manager.list_directory(path)
+            logger.info(
+                f"📂 Result: {result.get('success', False)}, Items: {len(result.get('items', []))}")
             return web.json_response(result)
         except Exception as e:
+            logger.error(f"❌ Error listing files: {str(e)}")
             return web.json_response({'success': False, 'error': str(e)}, status=500)
 
     async def read_file(self, request):
