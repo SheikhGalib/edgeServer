@@ -573,7 +573,7 @@ class HttpApiServer:
                     }
                 )
                 return response
-            
+
             # Handle actual requests
             try:
                 response = await handler(request)
@@ -583,7 +583,8 @@ class HttpApiServer:
                 return response
             except Exception as e:
                 logger.error(f"Error in CORS middleware: {str(e)}")
-                response = web.json_response({'success': False, 'error': str(e)}, status=500)
+                response = web.json_response(
+                    {'success': False, 'error': str(e)}, status=500)
                 response.headers['Access-Control-Allow-Origin'] = '*'
                 response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
                 response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
@@ -756,7 +757,8 @@ class HttpApiServer:
         try:
             logger.info("📊 Received request for system stats")
             stats = self.system_monitor.get_system_stats()
-            logger.info(f"📊 System stats generated successfully: CPU={stats.get('cpu_usage', 0)}%, RAM={stats.get('memory', {}).get('percentage', 0)}%")
+            logger.info(
+                f"📊 System stats generated successfully: CPU={stats.get('cpu_usage', 0)}%, RAM={stats.get('memory', {}).get('percentage', 0)}%")
             response = web.json_response({
                 'success': True,
                 'data': stats,
