@@ -563,11 +563,31 @@ class HttpApiServer:
         # CORS middleware
         @web.middleware
         async def handle_cors(request, handler):
-            response = await handler(request)
-            response.headers['Access-Control-Allow-Origin'] = '*'
-            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-            response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-            return response
+            # Handle OPTIONS preflight requests
+            if request.method == 'OPTIONS':
+                response = web.Response(
+                    headers={
+                        'Access-Control-Allow-Origin': '*',
+                        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+                        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+                    }
+                )
+                return response
+            
+            # Handle actual requests
+            try:
+                response = await handler(request)
+                response.headers['Access-Control-Allow-Origin'] = '*'
+                response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+                response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+                return response
+            except Exception as e:
+                logger.error(f"Error in CORS middleware: {str(e)}")
+                response = web.json_response({'success': False, 'error': str(e)}, status=500)
+                response.headers['Access-Control-Allow-Origin'] = '*'
+                response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+                response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+                return response
 
         async def handle_options(request):
             return web.Response(
@@ -591,9 +611,6 @@ class HttpApiServer:
 
         # System info
         self.app.router.add_get('/api/system/stats', self.get_system_stats)
-
-        # Handle OPTIONS requests
-        self.app.router.add_route('OPTIONS', '/{path:.*}', handle_options)
 
     async def list_files(self, request):
         """List directory contents"""
@@ -737,13 +754,20 @@ class HttpApiServer:
     async def get_system_stats(self, request):
         """Get system statistics"""
         try:
+            logger.info("📊 Received request for system stats")
             stats = self.system_monitor.get_system_stats()
-            return web.json_response({
+            logger.info(f"📊 System stats generated successfully: CPU={stats.get('cpu_usage', 0)}%, RAM={stats.get('memory', {}).get('percentage', 0)}%")
+            response = web.json_response({
                 'success': True,
                 'data': stats,
                 'device_id': self.device_id
             })
+            logger.info("📊 System stats response created successfully")
+            return response
         except Exception as e:
+            logger.error(f"❌ Error getting system stats: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return web.json_response({'success': False, 'error': str(e)}, status=500)
 
     async def start(self):
