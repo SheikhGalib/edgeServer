@@ -36,6 +36,7 @@ import json
 from urllib.parse import parse_qs
 import pty
 import select
+import traceback
 
 # Configure logging
 logging.basicConfig(
@@ -613,6 +614,9 @@ class HttpApiServer:
         # System info
         self.app.router.add_get('/api/system/stats', self.get_system_stats)
 
+        # Edge server logs
+        self.app.router.add_get('/api/logs', self.get_edge_logs)
+
     async def list_files(self, request):
         """List directory contents"""
         try:
@@ -769,6 +773,77 @@ class HttpApiServer:
         except Exception as e:
             logger.error(f"❌ Error getting system stats: {str(e)}")
             import traceback
+            traceback.print_exc()
+            return web.json_response({'success': False, 'error': str(e)}, status=500)
+
+    async def get_edge_logs(self, request):
+        """Get edge server logs (tail of log file)"""
+        try:
+            lines = request.query.get('lines', '15')
+            try:
+                lines = int(lines)
+                if lines <= 0 or lines > 1000:
+                    lines = 15
+            except ValueError:
+                lines = 15
+
+            logger.info(
+                f"📋 Received request for edge server logs (last {lines} lines)")
+
+            # Read the log file
+            log_file_path = 'edge_server.log'
+
+            if not os.path.exists(log_file_path):
+                return web.json_response({
+                    'success': False,
+                    'error': 'Log file not found'
+                }, status=404)
+
+            try:
+                # Use tail command if available (Unix/Linux/WSL)
+                import subprocess
+                result = subprocess.run(
+                    ['tail', f'-n{lines}', log_file_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+
+                if result.returncode == 0:
+                    logs = result.stdout
+                else:
+                    # Fallback to Python implementation
+                    raise subprocess.CalledProcessError(
+                        result.returncode, 'tail')
+
+            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+                # Fallback: read file manually and get last N lines
+                try:
+                    with open(log_file_path, 'r', encoding='utf-8', errors='replace') as f:
+                        all_lines = f.readlines()
+                        last_lines = all_lines[-lines:] if lines < len(
+                            all_lines) else all_lines
+                        logs = ''.join(last_lines)
+                except Exception as e:
+                    return web.json_response({
+                        'success': False,
+                        'error': f'Failed to read log file: {str(e)}'
+                    }, status=500)
+
+            logger.info(f"📋 Returning {len(logs.splitlines())} lines of logs")
+
+            return web.json_response({
+                'success': True,
+                'data': {
+                    'logs': logs.strip(),
+                    'lines_requested': lines,
+                    'lines_returned': len(logs.splitlines()),
+                    'device_id': self.device_id
+                }
+            })
+
+        except Exception as e:
+            logger.error(f"❌ Error getting edge server logs: {str(e)}")
             traceback.print_exc()
             return web.json_response({'success': False, 'error': str(e)}, status=500)
 
